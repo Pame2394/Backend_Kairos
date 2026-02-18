@@ -1,0 +1,76 @@
+Resumen del trabajo realizado
+=============================
+
+Proyecto: backendKiros (ruta: C:\Users\pame2\OneDrive\Imágenes\Escritorio\prompt\backendKiros)
+
+1) Scaffold y archivos iniciales
+- Se creó la estructura básica y archivos: `requirements.txt`, `.gitignore`, `.env.example`, `.env`, `README.md`, `start_backend.bat`.
+- Carpeta de aplicación: `app/` con `main.py`.
+
+2) Backend - FastAPI
+- Endpoints implementados:
+  - `POST /cotizar` -> devuelve JSON { precio, proforma }
+  - `POST /cotizar_pdf` -> devuelve PDF descargable
+  - `POST /cotizar_excel` -> devuelve Excel (.xlsx) descargable
+- Validación de entrada con Pydantic (`QuoteRequest`).
+- Cálculo de precios simple (base + horas * factor según complejidad).
+- Generación PDF con `reportlab` y Excel con `openpyxl`.
+- Limpieza de archivos temporales usando `BackgroundTasks`.
+- CORS habilitado para desarrollo.
+
+3) Integración con OpenAI (IA)
+- Soporte para la API moderna `OpenAI` (cliente `OpenAI`) usando variables en `.env`:
+  - `OPENAI_API_KEY` (clave secreta)
+  - `OPENAI_MODEL` (p. ej. `gpt-3.5-turbo`)
+  - `USE_OPENAI` (true/false) para activar/desactivar llamadas externas.
+- Función `generar_proforma_ai`:
+  - Si `USE_OPENAI=true` y hay clave, usa `client.chat.completions.create(...)` para generar la proforma.
+  - Si `USE_OPENAI=false` o no hay clave, devuelve una proforma generada localmente (modo gratis).
+- Manejo de errores y logging; en caso de errores de API se devuelve mensaje explicativo.
+
+4) Frontend (kairos)
+- Proyecto frontend en: C:\Users\pame2\OneDrive\Imágenes\Escritorio\prompt\kairos
+- Componente actualizado: `src/components/QuoteModal.jsx`:
+  - Envía `POST /cotizar` al backend al enviar el formulario.
+  - Muestra `precio` y `proforma` en UI.
+  - Botones para descargar PDF (`/cotizar_pdf`) y Excel (`/cotizar_excel`).
+  - Estados `loading`, `result`, `error` y manejo básico de UX.
+
+5) Pruebas automatizadas
+- `tests/run_tests.py` creado en el backend para probar los tres endpoints, guardar y validar archivos (chequeo de magic bytes para PDF/XLSX).
+- Tests ejecutados exitosamente en modo local (USE_OPENAI=false).
+- Al probar con la clave proporcionada, la API devolvió `insufficient_quota` y se activó modo local.
+
+6) Integración end-to-end
+- Se arrancó frontend (`npm run dev`) y backend (uvicorn). Probada la interacción:
+  - `POST /cotizar` respondió con precio/proforma.
+  - `POST /cotizar_pdf` devolvió archivo PDF (ejemplo guardado en `backendKiros/tests/output/front_cotizacion.pdf`).
+
+7) Seguridad y recomendaciones
+- `.env` está en `.gitignore` — no commitear claves.
+- Producción: añadir autenticación, rate limiting, caching y control de costes antes de habilitar OpenAI.
+- Mejoras IA: plantillas de prompt estructuradas, reintentos con backoff, limitar `max_tokens`.
+
+8) Comandos útiles
+- Iniciar backend:
+  python -m venv .venv
+  .\\.venv\\Scripts\\Activate.ps1
+  pip install -r requirements.txt
+  uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+- Iniciar frontend:
+  cd path\\to\\kairos
+  npm install
+  npm run dev
+- Ejecutar tests backend:
+  .\\.venv\\Scripts\\python.exe tests\\run_tests.py
+
+9) Archivos modificados destacados
+- `app/main.py` (IA, endpoints, CORS, validación, limpieza)
+- `backendKiros/.env` (plantilla y flags: OPENAI_API_KEY, OPENAI_MODEL, USE_OPENAI)
+- `backendKiros/README.md` (documentación añadida)
+- `backendKiros/tests/run_tests.py` (pruebas)
+- `kairos/src/components/QuoteModal.jsx` (integración fetch y descargas)
+
+Estado actual
+- Sistema funcional en modo local (sin coste) y preparado para habilitar OpenAI cuando la clave y la cuota estén OK.
+- Próximos pasos sugeridos: mejorar plantilla proforma, añadir autenticación/limites, caching y reintentos para IA.
