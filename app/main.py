@@ -4,32 +4,52 @@ import uvicorn
 import os
 import tempfile
 from dotenv import load_dotenv
-from openai import OpenAI
 from fastapi.middleware.cors import CORSMiddleware
 from reportlab.pdfgen import canvas
 import openpyxl
 import logging
 from pydantic import BaseModel, Field
-from typing import Literal, Optional
-import google.generativeai as genai
+from typing import Literal, Optional, Any
+import time
+import concurrent.futures
+
+# Try modern GenAI SDK first, fall back to legacy
+GENAI_SDK = None
+genai_modern = None
+genai_legacy = None
+try:
+    import google.genai as genai_modern
+    GENAI_SDK = "modern"
+except Exception:
+    genai_modern = None
+    try:
+        import google.generativeai as genai_legacy
+        GENAI_SDK = "legacy"
+    except Exception:
+        genai_legacy = None
+        GENAI_SDK = None
 
 load_dotenv()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
-USE_OPENAI = os.getenv("USE_OPENAI", "true").lower() in ("1", "true", "yes")
-client = None
-if OPENAI_API_KEY and USE_OPENAI:
-    client = OpenAI(api_key=OPENAI_API_KEY)
-# Google Gemini configuration (optional)
+# Google Gemini configuration
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 USE_GOOGLE = os.getenv("USE_GOOGLE", "false").lower() in ("1", "true", "yes")
 if GOOGLE_API_KEY and USE_GOOGLE:
     try:
-        genai.configure(api_key=GOOGLE_API_KEY)
+        if GENAI_SDK == "modern" and genai_modern is not None:
+            # modern SDK often uses a Client object; we'll prefer that at call time
+            logger.info("Usando SDK moderno google.genai para Gemini")
+        elif GENAI_SDK == "legacy" and genai_legacy is not None:
+            try:
+                genai_legacy.configure(api_key=GOOGLE_API_KEY)
+                logger.info("google.generativeai configurado con la clave proporcionada")
+            except Exception:
+                logger.exception("No se pudo configurar google.generativeai con la clave proporcionada")
+        else:
+            logger.warning("No se detectó ninguna SDK de GenAI instalada (ni modern ni legacy)")
     except Exception:
         logger = logging.getLogger(__name__)
-        logger.exception("No se pudo configurar google.generativeai con la clave proporcionada")
+        logger.exception("Error al intentar configurar GenAI SDK")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -70,74 +90,81 @@ async def generar_proforma_ai(cliente: str, servicio: str, horas: int, complejid
     )
 
     if GOOGLE_API_KEY and USE_GOOGLE:
-        try:
-            logger.info("Intentando generar proforma con Google Gemini (GenerativeModel)")
-            model_obj = genai.GenerativeModel("gemini-2.5-flash")
-            resp = model_obj.generate_content(prompt)
-            # extraer texto de la respuesta de forma robusta
-            text = None
-            if isinstance(resp, dict):
-                candidates = resp.get("candidates") or resp.get("outputs") or []
-                if candidates and isinstance(candidates, list) and candidates[0]:
-                    cand = candidates[0]
-                    if isinstance(cand, dict):
-                        text = cand.get("content") or cand.get("text") or cand.get("output")
-                text = text or resp.get("output_text") or resp.get("text") or resp.get("content")
-            else:
-                # respuesta podría ser un objeto con atributos
-                text = getattr(resp, "content", None) or getattr(resp, "text", None) or getattr(resp, "output_text", None)
+        max_retries = int(os.getenv("GENAI_MAX_RETRIES", "3"))
+        timeout_sec = float(os.getenv("GENAI_TIMEOUT", "10.0"))
+        backoff_base = float(os.getenv("GENAI_BACKOFF_BASE", "1.0"))
 
-            if text:
-                logger.info("Proforma generada por Gemini (long=%d)", len(text))
-                return text.strip()
-            else:
-                logger.warning("Gemini devolvió respuesta sin texto útil: %r", resp)
-        except Exception as e:
-            logger.exception("Error generando proforma con Google Gemini: %s", e)
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info("Intentando generar proforma con GenAI (sdk=%s) intento %d/%d", GENAI_SDK, attempt, max_retries)
 
-    # Si el modo IA de OpenAI está desactivado o no hay clave, generar localmente
-    if not OPENAI_API_KEY or not USE_OPENAI or not client:
-        return (
-            f"Proforma para {cliente}: Servicio {servicio}, {horas} horas, "
-            f"complejidad {complejidad}. Precio estimado: {precio} dólares.\n\n"
-            "Gracias por su interés. Esta proforma fue generada localmente sin usar servicios externos."
-        )
+                def _call_genai() -> Any:
+                    # Modern SDK
+                    if GENAI_SDK == "modern" and genai_modern is not None:
+                        if hasattr(genai_modern, "Client"):
+                            client_gen = genai_modern.Client(api_key=GOOGLE_API_KEY)
+                            # prefer generate() if available
+                            if hasattr(client_gen, "generate"):
+                                return client_gen.generate(model=os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"), input=prompt)
+                            # fallback: try a top-level generate
+                            if hasattr(genai_modern, "generate"):
+                                return genai_modern.generate(model=os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"), input=prompt)
+                            raise RuntimeError("API de google.genai no tiene método generate esperado")
 
-    # Intentar con OpenAI si está configurado
-    system_msg = (
-        "Eres un asistente que genera proformas y cotizaciones profesionales y concisas. "
-        "Devuelve un texto cordial, claro y estructurado para enviar a un cliente."
+                    # Legacy SDK
+                    if GENAI_SDK == "legacy" and genai_legacy is not None:
+                        model_obj = genai_legacy.GenerativeModel(os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"))
+                        # legacy method
+                        return model_obj.generate_content(prompt)
+
+                    raise RuntimeError("No hay SDK GenAI disponible para realizar la llamada")
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                    fut = ex.submit(_call_genai)
+                    resp = fut.result(timeout=timeout_sec)
+
+                # extraer texto de la respuesta de forma robusta
+                text = None
+                if isinstance(resp, dict):
+                    candidates = resp.get("candidates") or resp.get("outputs") or []
+                    if candidates and isinstance(candidates, list) and candidates[0]:
+                        cand = candidates[0]
+                        if isinstance(cand, dict):
+                            text = cand.get("content") or cand.get("text") or cand.get("output")
+                    text = text or resp.get("output_text") or resp.get("text") or resp.get("content")
+                else:
+                    # respuesta podría ser un objeto con atributos
+                    text = getattr(resp, "content", None) or getattr(resp, "text", None) or getattr(resp, "output_text", None) or getattr(resp, "outputs", None)
+
+                if text:
+                    logger.info("Proforma generada por GenAI (long=%d)", len(str(text)))
+                    return str(text).strip()
+                else:
+                    logger.warning("GenAI devolvió respuesta sin texto útil (intento %d): %r", attempt, resp)
+                    last_exc = RuntimeError("Respuesta vacía de GenAI")
+            except concurrent.futures.TimeoutError:
+                last_exc = TimeoutError(f"Timeout al llamar a GenAI después de {timeout_sec}s")
+                logger.warning("Timeout en llamada a GenAI (intento %d/%d)", attempt, max_retries)
+            except Exception as e:
+                last_exc = e
+                logger.exception("Error en intento de GenAI (intento %d/%d): %s", attempt, max_retries, e)
+
+            # backoff exponencial antes del siguiente intento
+            if attempt < max_retries:
+                sleep_time = backoff_base * (2 ** (attempt - 1))
+                logger.info("Esperando %.1fs antes del siguiente intento", sleep_time)
+                time.sleep(sleep_time)
+
+        # si llegamos aquí, todos los intentos fallaron
+        logger.error("Todos los intentos a GenAI fallaron: última excepción: %s", last_exc)
+
+    # Fallback local si Gemini no está configurado o falló
+    return (
+        f"Proforma para {cliente}: Servicio {servicio}, {horas} horas, "
+        f"complejidad {complejidad}. Precio estimado: {precio} dólares.\n\n"
+        "Gracias por su interés. Esta proforma fue generada localmente."
     )
-    user_msg = (
-        f"Genera una proforma breve y profesional para {cliente}. "
-        f"El servicio solicitado es '{servicio}', con {horas} horas de trabajo "
-        f"y complejidad {complejidad}. El costo estimado es {precio} dólares. "
-        "Redacta un texto claro y cordial."
-    )
-
-    try:
-        resp = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.2,
-            max_tokens=350,
-        )
-        if resp and getattr(resp, "choices", None):
-            choice0 = resp.choices[0]
-            content = None
-            if hasattr(choice0, "message") and isinstance(choice0.message, dict):
-                content = choice0.message.get("content")
-            elif hasattr(choice0, "message") and hasattr(choice0.message, "content"):
-                content = getattr(choice0.message, "content")
-            elif isinstance(choice0, dict):
-                content = choice0.get("message", {}).get("content") or choice0.get("text")
-            return (content or "(Respuesta vacía de la IA)").strip()
-    except Exception as e:
-        logger.exception("Error generando proforma IA con la API moderna de OpenAI: %s", e)
-        return f"(Error generando proforma IA: {e})"
 
 
 def _cleanup_file(path: str) -> None:
