@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: backend-kairos
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GOOGLE_API_KEY
+        sync: false          # se configura manualmente en el dashboard de Render
+      - key: USE_GOOGLE
+        value: "true"
+      - key: GOOGLE_MODEL
+        value: "gemini-2.5-flash"
+      - key: GENAI_MAX_RETRIES
+        value: "3"
+      - key: GENAI_TIMEOUT
+        value: "15.0"
+      - key: GENAI_BACKOFF_BASE
+        value: "1.0"
