@@ -69,6 +69,12 @@ class QuoteRequest(BaseModel):
     horas: int = Field(1, ge=1, description="Número de horas, entero >= 1")
     complejidad: Literal["baja", "media", "alta"] = "media"
     cliente: Optional[str] = Field("Cliente")
+    nombre: Optional[str] = Field(None)
+    telefono: Optional[str] = Field(None)
+    correo: Optional[str] = Field(None)
+    fecha: Optional[str] = Field(None)
+    condiciones: Optional[str] = Field(None)
+    vigencia: Optional[str] = Field("15 días")
 
 
 def calcular_precio(horas: int, complejidad: str) -> int:
@@ -80,12 +86,45 @@ def calcular_precio(horas: int, complejidad: str) -> int:
     return base + horas * 100
 
 
-async def generar_proforma_ai(cliente: str, servicio: str, horas: int, complejidad: str, precio: int) -> str:
-    # Si el usuario desea usar Google Gemini y hay clave, intentarlo primero
+async def generar_proforma_ai(
+    nombre: str,
+    telefono: str,
+    correo: str,
+    servicio: str,
+    horas: int,
+    complejidad: str,
+    precio: int,
+    fecha: str = None,
+    condiciones: str = None,
+    vigencia: str = "15 días"
+) -> str:
+    """
+    Prompt optimizado para que el LLM genere una proforma
+    que coincida con los datos del formulario del cliente.
+    """
     prompt = (
-        f"Genera una proforma profesional para el servicio: {servicio}. "
-        f"Cliente: {cliente}. Horas estimadas: {horas}. Complejidad: {complejidad}. "
-        f"Precio total: ${precio}. Nota: Esta es una cotización referencial, sujeta a ajustes."
+        f"Genera una proforma profesional en formato de cotización oficial.\n\n"
+        f"Encabezado:\n"
+        f"- Empresa emisora: [Nombre de la empresa]\n"
+        f"- Fecha: {fecha if fecha else '[Fecha actual]'}\n"
+        f"- Número de Proforma: PRF-2026-XXXX\n\n"
+        f"Datos del cliente:\n"
+        f"- Nombre completo: {nombre}\n"
+        f"- Teléfono: {telefono}\n"
+        f"- Correo electrónico: {correo}\n\n"
+        f"Detalles del servicio solicitado:\n"
+        f"- Servicio: {servicio}\n"
+        f"- Horas estimadas: {horas}\n"
+        f"- Complejidad: {complejidad}\n"
+        f"- Precio total: ${precio}\n\n"
+        f"Instrucciones para el formato:\n"
+        f"1. Organiza la información en secciones: Encabezado, Datos del Cliente, Detalles del Servicio, Resumen de Costos, Condiciones, Nota Final.\n"
+        f"2. Usa un tono formal y claro.\n"
+        f"3. Incluye una breve descripción del alcance del servicio.\n"
+        f"4. Añade condiciones: {condiciones if condiciones else '[Condiciones de pago y entrega]'}.\n"
+        f"5. Indica la vigencia de la oferta: {vigencia}.\n"
+        f"6. Finaliza con la nota: 'Esta es una cotización referencial, sujeta a ajustes.'\n"
+        f"7. Formatea la salida como documento listo para enviar por correo y exportar a PDF/Excel."
     )
 
     if GOOGLE_API_KEY and USE_GOOGLE:
@@ -153,7 +192,7 @@ async def generar_proforma_ai(cliente: str, servicio: str, horas: int, complejid
 
     # Fallback local si Gemini no está configurado o falló
     return (
-        f"Proforma para {cliente}: Servicio {servicio}, {horas} horas, "
+        f"Proforma para {nombre}: Servicio {servicio}, {horas} horas, "
         f"complejidad {complejidad}. Precio estimado: {precio} dólares.\n\n"
         "Gracias por su interés. Esta proforma fue generada localmente."
     )
@@ -170,14 +209,36 @@ def _cleanup_file(path: str) -> None:
 @app.post("/cotizar")
 async def cotizar(payload: QuoteRequest):
     precio = calcular_precio(payload.horas, payload.complejidad)
-    proforma = await generar_proforma_ai(payload.cliente or "Cliente", payload.servicio, payload.horas, payload.complejidad, precio)
+    proforma = await generar_proforma_ai(
+        nombre=payload.nombre or payload.cliente or "Cliente",
+        telefono=payload.telefono or "No especificado",
+        correo=payload.correo or "No especificado",
+        servicio=payload.servicio,
+        horas=payload.horas,
+        complejidad=payload.complejidad,
+        precio=precio,
+        fecha=payload.fecha,
+        condiciones=payload.condiciones,
+        vigencia=payload.vigencia or "15 días",
+    )
     return JSONResponse({"precio": precio, "proforma": proforma})
 
 
 @app.post("/cotizar_pdf")
 async def cotizar_pdf(payload: QuoteRequest, background_tasks: BackgroundTasks):
     precio = calcular_precio(payload.horas, payload.complejidad)
-    proforma = await generar_proforma_ai(payload.cliente or "Cliente", payload.servicio, payload.horas, payload.complejidad, precio)
+    proforma = await generar_proforma_ai(
+        nombre=payload.nombre or payload.cliente or "Cliente",
+        telefono=payload.telefono or "No especificado",
+        correo=payload.correo or "No especificado",
+        servicio=payload.servicio,
+        horas=payload.horas,
+        complejidad=payload.complejidad,
+        precio=precio,
+        fecha=payload.fecha,
+        condiciones=payload.condiciones,
+        vigencia=payload.vigencia or "15 días",
+    )
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     filename = tmp.name
@@ -185,7 +246,7 @@ async def cotizar_pdf(payload: QuoteRequest, background_tasks: BackgroundTasks):
 
     c = canvas.Canvas(filename)
     c.setFont("Helvetica", 12)
-    c.drawString(100, 780, f"Cotización para: {payload.cliente}")
+    c.drawString(100, 780, f"Cotización para: {payload.nombre or payload.cliente}")
     c.drawString(100, 760, f"Servicio: {payload.servicio}")
     c.drawString(100, 740, f"Horas: {payload.horas}")
     c.drawString(100, 720, f"Complejidad: {payload.complejidad}")
@@ -210,8 +271,8 @@ async def cotizar_excel(payload: QuoteRequest, background_tasks: BackgroundTasks
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Cotización"
-    ws.append(["Cliente", "Servicio", "Horas", "Complejidad", "Precio"])
-    ws.append([payload.cliente, payload.servicio, payload.horas, payload.complejidad, precio])
+    ws.append(["Cliente", "Teléfono", "Correo", "Servicio", "Horas", "Complejidad", "Precio"])
+    ws.append([payload.nombre or payload.cliente, payload.telefono, payload.correo, payload.servicio, payload.horas, payload.complejidad, precio])
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
     filename = tmp.name
