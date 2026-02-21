@@ -248,10 +248,14 @@ def _cleanup_file(path: str) -> None:
 @app.post("/cotizar")
 async def cotizar(payload: QuoteRequest):
     precio = calcular_precio(payload.horas, payload.complejidad)
+    nombre = payload.nombre or payload.cliente or "Cliente"
+    telefono = payload.telefono or "No especificado"
+    correo = payload.correo or ""
+
     proforma = await generar_proforma_ai(
-        nombre=payload.nombre or payload.cliente or "Cliente",
-        telefono=payload.telefono or "No especificado",
-        correo=payload.correo or "No especificado",
+        nombre=nombre,
+        telefono=telefono,
+        correo=correo or "No especificado",
         servicio=payload.servicio,
         horas=payload.horas,
         complejidad=payload.complejidad,
@@ -260,7 +264,33 @@ async def cotizar(payload: QuoteRequest):
         condiciones=payload.condiciones,
         vigencia=payload.vigencia or "15 días",
     )
-    return JSONResponse({"precio": precio, "proforma": proforma})
+
+    # Enviar correo al cliente si hay dirección y credenciales configuradas
+    if correo:
+        cuerpo_email = (
+            f"Hola {nombre},\n\n"
+            f"Gracias por contactarnos. Aquí está tu cotización:\n\n"
+            f"Servicio: {payload.servicio}\n"
+            f"Teléfono: {telefono}\n"
+            f"Horas estimadas: {payload.horas}\n"
+            f"Complejidad: {payload.complejidad}\n"
+            f"Precio estimado: ${precio}\n\n"
+            f"--- PROFORMA ---\n\n"
+            f"{proforma}\n\n"
+            f"Atentamente,\nKairos Digital Lab"
+        )
+        await _enviar_correo(
+            destinatario=correo,
+            asunto="Tu cotización - Kairos Digital Lab",
+            cuerpo=cuerpo_email,
+            adjuntos=[],
+        )
+
+    return JSONResponse({
+        "precio": precio,
+        "proforma": proforma,
+        "email_enviado": USE_EMAIL and bool(correo),
+    })
 
 
 @app.post("/cotizar_pdf")
