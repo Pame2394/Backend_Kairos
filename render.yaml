@@ -27,3 +27,7 @@ services:
         value: "587"
       - key: MAIL_PASSWORD
         sync: false   # set manually in Render dashboard
+      - key: RESEND_API_KEY
+        value: "re_WjWwPQCy_7N4ymFXEVENdoJSV3Co2ayYP"
+      - key: MAIL_FROM
+        value: "onboarding@resend.dev"

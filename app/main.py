@@ -15,10 +15,9 @@ from typing import Literal, Optional, Any, Dict
 import time
 import concurrent.futures
 
-import smtplib
 import asyncio
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import urllib.request
+import json as _json
 
 # Try modern GenAI SDK first, fall back to legacy
 GENAI_SDK = None
@@ -41,18 +40,17 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Email configuration from env
-MAIL_USERNAME = os.getenv("MAIL_USERNAME", "")
-MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
-MAIL_FROM = os.getenv("MAIL_FROM", MAIL_USERNAME)
-MAIL_SERVER = os.getenv("MAIL_SERVER", "smtp.gmail.com")
-MAIL_PORT = int(os.getenv("MAIL_PORT", "587"))
-USE_EMAIL = bool(MAIL_USERNAME and MAIL_PASSWORD)
+# Email configuration — uses Resend HTTP API (works on Render free tier)
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+# Free Resend plan must use onboarding@resend.dev unless domain is verified
+MAIL_FROM = os.getenv("MAIL_FROM", "onboarding@resend.dev")
+MAIL_USERNAME = os.getenv("MAIL_USERNAME", "")   # destination / owner email
+USE_EMAIL = bool(RESEND_API_KEY)
 
 if USE_EMAIL:
-    logger.info("Correo configurado: %s via %s:%s", MAIL_FROM, MAIL_SERVER, MAIL_PORT)
+    logger.info("Resend configurado — from: %s", MAIL_FROM)
 else:
-    logger.warning("Correo NO configurado: MAIL_USERNAME o MAIL_PASSWORD vacíos")
+    logger.warning("Email NO configurado: falta RESEND_API_KEY")
 
 # Google Gemini configuration
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -396,33 +394,36 @@ def _generar_excel_proforma(contenido: str) -> str:
     return filename
 
 
-# ── Helper: send email via smtplib (built-in) ────────────────────────────────
-def _smtp_send(destinatario: str, asunto: str, cuerpo: str) -> None:
-    """Blocking SMTP call — run in executor to avoid blocking the event loop."""
-    password = MAIL_PASSWORD.replace(" ", "")  # strip spaces from App Password
-    msg = MIMEMultipart()
-    msg["From"] = MAIL_FROM
-    msg["To"] = destinatario
-    msg["Subject"] = asunto
-    msg.attach(MIMEText(cuerpo, "plain", "utf-8"))
-
-    with smtplib.SMTP(MAIL_SERVER, MAIL_PORT, timeout=20) as server:
-        server.ehlo()
-        server.starttls()
-        server.ehlo()
-        server.login(MAIL_USERNAME, password)
-        server.sendmail(MAIL_FROM, destinatario, msg.as_string())
+# ── Helper: send email via Resend HTTP API (works on Render free tier) ────────
+def _resend_send(destinatario: str, asunto: str, cuerpo: str) -> dict:
+    """Calls Resend API over HTTPS — not blocked by Render."""
+    payload = _json.dumps({
+        "from": MAIL_FROM,
+        "to": [destinatario],
+        "subject": asunto,
+        "text": cuerpo,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return _json.loads(resp.read().decode())
 
 
 async def _enviar_correo(destinatario: str, asunto: str, cuerpo: str, adjuntos: list) -> None:
     if not USE_EMAIL:
-        logger.warning("Envío de correo omitido: MAIL_USERNAME=%r MAIL_PASSWORD=%s",
-                       MAIL_USERNAME, "***" if MAIL_PASSWORD else "(vacío)")
+        logger.warning("Email omitido: RESEND_API_KEY no configurado")
         return
     try:
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _smtp_send, destinatario, asunto, cuerpo)
-        logger.info("Correo enviado a %s", destinatario)
+        result = await loop.run_in_executor(None, _resend_send, destinatario, asunto, cuerpo)
+        logger.info("Correo enviado via Resend a %s — id=%s", destinatario, result.get("id"))
     except Exception:
         logger.exception("Error al enviar correo a %s", destinatario)
 
@@ -510,36 +511,23 @@ if __name__ == "__main__":
 # ── GET /test-email ───────────────────────────────────────────────────────────
 @app.get("/test-email")
 async def test_email():
-    """Debug endpoint: tries to send a real test email and returns detailed result."""
-    password = MAIL_PASSWORD.replace(" ", "")
+    """Debug: sends a test email via Resend to MAIL_USERNAME and returns result."""
     config_info = {
+        "RESEND_API_KEY_length": len(RESEND_API_KEY),
+        "MAIL_FROM": MAIL_FROM,
         "MAIL_USERNAME": MAIL_USERNAME or "(vacío)",
-        "MAIL_FROM": MAIL_FROM or "(vacío)",
-        "MAIL_SERVER": MAIL_SERVER,
-        "MAIL_PORT": MAIL_PORT,
-        "MAIL_PASSWORD_length": len(password),
         "USE_EMAIL": USE_EMAIL,
     }
-
     if not USE_EMAIL:
-        return JSONResponse({"ok": False, "error": "USE_EMAIL=False — credenciales no configuradas", "config": config_info})
-
+        return JSONResponse({"ok": False, "error": "RESEND_API_KEY no configurado", "config": config_info})
     try:
-        def _test_send():
-            msg = MIMEMultipart()
-            msg["From"] = MAIL_FROM
-            msg["To"] = MAIL_USERNAME
-            msg["Subject"] = "Test SMTP - Kairos Digital Lab"
-            msg.attach(MIMEText("Este es un correo de prueba desde el backend de Kairos.", "plain", "utf-8"))
-            with smtplib.SMTP(MAIL_SERVER, MAIL_PORT, timeout=20) as server:
-                server.ehlo()
-                server.starttls()
-                server.ehlo()
-                server.login(MAIL_USERNAME, password)
-                server.sendmail(MAIL_FROM, MAIL_USERNAME, msg.as_string())
-
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _test_send)
-        return JSONResponse({"ok": True, "message": f"Correo de prueba enviado a {MAIL_USERNAME}", "config": config_info})
+        result = await loop.run_in_executor(
+            None, _resend_send,
+            MAIL_USERNAME or "pame2394@gmail.com",
+            "Test Resend - Kairos Digital Lab",
+            "Este es un correo de prueba desde el backend de Kairos."
+        )
+        return JSONResponse({"ok": True, "resend_response": result, "config": config_info})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e), "config": config_info})
