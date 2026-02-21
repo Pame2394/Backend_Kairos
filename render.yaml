@@ -17,3 +17,13 @@ services:
         value: "15.0"
       - key: GENAI_BACKOFF_BASE
         value: "1.0"
+      - key: MAIL_USERNAME
+        value: "Pame2394@gmail.com"
+      - key: MAIL_FROM
+        value: "Pame2394@gmail.com"
+      - key: MAIL_SERVER
+        value: "smtp.gmail.com"
+      - key: MAIL_PORT
+        value: "587"
+      - key: MAIL_PASSWORD
+        sync: false   # set manually in Render dashboard
