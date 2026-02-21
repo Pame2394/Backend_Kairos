@@ -31,6 +31,9 @@ except Exception:
 
 load_dotenv()
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Google Gemini configuration
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 USE_GOOGLE = os.getenv("USE_GOOGLE", "false").lower() in ("1", "true", "yes")
@@ -48,11 +51,7 @@ if GOOGLE_API_KEY and USE_GOOGLE:
         else:
             logger.warning("No se detectó ninguna SDK de GenAI instalada (ni modern ni legacy)")
     except Exception:
-        logger = logging.getLogger(__name__)
         logger.exception("Error al intentar configurar GenAI SDK")
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 app = FastAPI(title="backendKiros - Cotizaciones con IA")
 # CORS: permitir peticiones desde el frontend en desarrollo
@@ -100,22 +99,15 @@ async def generar_proforma_ai(cliente: str, servicio: str, horas: int, complejid
                 logger.info("Intentando generar proforma con GenAI (sdk=%s) intento %d/%d", GENAI_SDK, attempt, max_retries)
 
                 def _call_genai() -> Any:
-                    # Modern SDK
+                    # Modern SDK: google.genai
                     if GENAI_SDK == "modern" and genai_modern is not None:
-                        if hasattr(genai_modern, "Client"):
-                            client_gen = genai_modern.Client(api_key=GOOGLE_API_KEY)
-                            # prefer generate() if available
-                            if hasattr(client_gen, "generate"):
-                                return client_gen.generate(model=os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"), input=prompt)
-                            # fallback: try a top-level generate
-                            if hasattr(genai_modern, "generate"):
-                                return genai_modern.generate(model=os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"), input=prompt)
-                            raise RuntimeError("API de google.genai no tiene método generate esperado")
+                        client_gen = genai_modern.Client(api_key=GOOGLE_API_KEY)
+                        model_name = os.getenv("GOOGLE_MODEL", "gemini-2.0-flash")
+                        return client_gen.models.generate_content(model=model_name, contents=prompt)
 
-                    # Legacy SDK
+                    # Legacy SDK: google.generativeai
                     if GENAI_SDK == "legacy" and genai_legacy is not None:
-                        model_obj = genai_legacy.GenerativeModel(os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"))
-                        # legacy method
+                        model_obj = genai_legacy.GenerativeModel(os.getenv("GOOGLE_MODEL", "gemini-2.0-flash"))
                         return model_obj.generate_content(prompt)
 
                     raise RuntimeError("No hay SDK GenAI disponible para realizar la llamada")
@@ -134,8 +126,8 @@ async def generar_proforma_ai(cliente: str, servicio: str, horas: int, complejid
                             text = cand.get("content") or cand.get("text") or cand.get("output")
                     text = text or resp.get("output_text") or resp.get("text") or resp.get("content")
                 else:
-                    # respuesta podría ser un objeto con atributos
-                    text = getattr(resp, "content", None) or getattr(resp, "text", None) or getattr(resp, "output_text", None) or getattr(resp, "outputs", None)
+                    # modern/legacy SDK: .text is the simplest accessor
+                    text = getattr(resp, "text", None) or getattr(resp, "output_text", None) or getattr(resp, "outputs", None) or getattr(resp, "content", None)
 
                 if text:
                     logger.info("Proforma generada por GenAI (long=%d)", len(str(text)))
