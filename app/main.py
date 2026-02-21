@@ -16,6 +16,7 @@ import time
 import concurrent.futures
 
 import smtplib
+import asyncio
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -396,25 +397,31 @@ def _generar_excel_proforma(contenido: str) -> str:
 
 
 # ── Helper: send email via smtplib (built-in) ────────────────────────────────
+def _smtp_send(destinatario: str, asunto: str, cuerpo: str) -> None:
+    """Blocking SMTP call — run in executor to avoid blocking the event loop."""
+    password = MAIL_PASSWORD.replace(" ", "")  # strip spaces from App Password
+    msg = MIMEMultipart()
+    msg["From"] = MAIL_FROM
+    msg["To"] = destinatario
+    msg["Subject"] = asunto
+    msg.attach(MIMEText(cuerpo, "plain", "utf-8"))
+
+    with smtplib.SMTP(MAIL_SERVER, MAIL_PORT, timeout=20) as server:
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        server.login(MAIL_USERNAME, password)
+        server.sendmail(MAIL_FROM, destinatario, msg.as_string())
+
+
 async def _enviar_correo(destinatario: str, asunto: str, cuerpo: str, adjuntos: list) -> None:
     if not USE_EMAIL:
         logger.warning("Envío de correo omitido: MAIL_USERNAME=%r MAIL_PASSWORD=%s",
                        MAIL_USERNAME, "***" if MAIL_PASSWORD else "(vacío)")
         return
     try:
-        msg = MIMEMultipart()
-        msg["From"] = MAIL_FROM
-        msg["To"] = destinatario
-        msg["Subject"] = asunto
-        msg.attach(MIMEText(cuerpo, "plain", "utf-8"))
-
-        with smtplib.SMTP(MAIL_SERVER, MAIL_PORT, timeout=15) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(MAIL_USERNAME, MAIL_PASSWORD)
-            server.sendmail(MAIL_FROM, destinatario, msg.as_string())
-
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _smtp_send, destinatario, asunto, cuerpo)
         logger.info("Correo enviado a %s", destinatario)
     except Exception:
         logger.exception("Error al enviar correo a %s", destinatario)
