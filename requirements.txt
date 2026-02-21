@@ -6,3 +6,6 @@ python-dotenv
 google-generativeai
 google-genai
 pydantic
+fastapi-mail
+fpdf2
+aiofiles

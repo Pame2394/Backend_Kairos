@@ -1,17 +1,26 @@
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Form
 from fastapi.responses import FileResponse, JSONResponse
 import uvicorn
 import os
 import tempfile
+import uuid
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
 from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
 import openpyxl
 import logging
 from pydantic import BaseModel, Field
-from typing import Literal, Optional, Any
+from typing import Literal, Optional, Any, Dict
 import time
 import concurrent.futures
+
+# Optional fastapi-mail import
+try:
+    from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
+    _MAIL_AVAILABLE = True
+except ImportError:
+    _MAIL_AVAILABLE = False
 
 # Try modern GenAI SDK first, fall back to legacy
 GENAI_SDK = None
@@ -33,6 +42,33 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Email configuration from env
+MAIL_USERNAME = os.getenv("MAIL_USERNAME", "")
+MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
+MAIL_FROM = os.getenv("MAIL_FROM", MAIL_USERNAME)
+MAIL_SERVER = os.getenv("MAIL_SERVER", "smtp.gmail.com")
+MAIL_PORT = int(os.getenv("MAIL_PORT", "587"))
+USE_EMAIL = bool(MAIL_USERNAME and MAIL_PASSWORD and _MAIL_AVAILABLE)
+
+_fastmail: Optional[Any] = None
+if USE_EMAIL:
+    try:
+        _mail_conf = ConnectionConfig(
+            MAIL_USERNAME=MAIL_USERNAME,
+            MAIL_PASSWORD=MAIL_PASSWORD,
+            MAIL_FROM=MAIL_FROM,
+            MAIL_PORT=MAIL_PORT,
+            MAIL_SERVER=MAIL_SERVER,
+            MAIL_STARTTLS=True,
+            MAIL_SSL_TLS=False,
+            USE_CREDENTIALS=True,
+        )
+        _fastmail = FastMail(_mail_conf)
+        logger.info("Correo configurado: %s via %s:%s", MAIL_FROM, MAIL_SERVER, MAIL_PORT)
+    except Exception:
+        logger.exception("No se pudo configurar fastapi-mail")
+        USE_EMAIL = False
 
 # Google Gemini configuration
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -62,6 +98,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# In-memory store for downloadable temp files {file_id: (path, media_type, filename)}
+_download_store: Dict[str, tuple] = {}
 
 
 class QuoteRequest(BaseModel):
@@ -282,6 +321,160 @@ async def cotizar_excel(payload: QuoteRequest, background_tasks: BackgroundTasks
 
     background_tasks.add_task(_cleanup_file, filename)
     return FileResponse(filename, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename="cotizacion.xlsx")
+
+
+# ── Helper: generate PDF using reportlab ──────────────────────────────────────
+def _generar_pdf_proforma(contenido: str, nombre: str) -> str:
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    filename = tmp.name
+    tmp.close()
+
+    page_w, page_h = A4
+    c = canvas.Canvas(filename, pagesize=A4)
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(50, page_h - 50, "Proforma de Servicios - Kairos Digital Lab")
+    c.setFont("Helvetica", 11)
+
+    y = page_h - 80
+    margin = 50
+    line_h = 14
+
+    for raw_line in contenido.splitlines():
+        # wrap long lines
+        words = raw_line.split()
+        line = ""
+        for word in words:
+            test = (line + " " + word).strip()
+            if c.stringWidth(test, "Helvetica", 11) < (page_w - 2 * margin):
+                line = test
+            else:
+                c.drawString(margin, y, line)
+                y -= line_h
+                if y < 60:
+                    c.showPage()
+                    c.setFont("Helvetica", 11)
+                    y = page_h - 50
+                line = word
+        if line:
+            c.drawString(margin, y, line)
+            y -= line_h
+            if y < 60:
+                c.showPage()
+                c.setFont("Helvetica", 11)
+                y = page_h - 50
+
+    c.save()
+    return filename
+
+
+# ── Helper: generate Excel ────────────────────────────────────────────────────
+def _generar_excel_proforma(contenido: str) -> str:
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
+    filename = tmp.name
+    tmp.close()
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Proforma"
+    for i, linea in enumerate(contenido.splitlines(), start=1):
+        ws.cell(row=i, column=1, value=linea)
+    wb.save(filename)
+    return filename
+
+
+# ── Helper: send email ────────────────────────────────────────────────────────
+async def _enviar_correo(destinatario: str, asunto: str, cuerpo: str, adjuntos: list) -> None:
+    if not USE_EMAIL or _fastmail is None:
+        logger.warning("Envío de correo omitido: credenciales no configuradas")
+        return
+    try:
+        mensaje = MessageSchema(
+            subject=asunto,
+            recipients=[destinatario],
+            body=cuerpo,
+            attachments=adjuntos,
+            subtype=MessageType.plain,
+        )
+        await _fastmail.send_message(mensaje)
+        logger.info("Correo enviado a %s", destinatario)
+    except Exception:
+        logger.exception("Error al enviar correo a %s", destinatario)
+
+
+# ── GET /api/download/{file_id} ───────────────────────────────────────────────
+@app.get("/api/download/{file_id}")
+async def download_file(file_id: str, background_tasks: BackgroundTasks):
+    entry = _download_store.pop(file_id, None)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Archivo no encontrado o ya descargado")
+    path, media_type, dl_name = entry
+    background_tasks.add_task(_cleanup_file, path)
+    return FileResponse(path, media_type=media_type, filename=dl_name)
+
+
+# ── POST /api/proforma ────────────────────────────────────────────────────────
+class ProformaRequest(BaseModel):
+    nombre: str
+    telefono: str
+    correo: str
+    servicio: str
+    horas: int = Field(1, ge=1)
+    complejidad: Literal["baja", "media", "alta"] = "media"
+    precio: Optional[int] = None
+    fecha: Optional[str] = None
+    condiciones: Optional[str] = None
+    vigencia: Optional[str] = "15 días"
+
+
+@app.post("/api/proforma")
+async def crear_proforma(payload: ProformaRequest):
+    # 1. Calcular precio si no viene del cliente
+    precio = payload.precio if payload.precio is not None else calcular_precio(payload.horas, payload.complejidad)
+
+    # 2. Generar proforma con IA
+    contenido = await generar_proforma_ai(
+        nombre=payload.nombre,
+        telefono=payload.telefono,
+        correo=payload.correo,
+        servicio=payload.servicio,
+        horas=payload.horas,
+        complejidad=payload.complejidad,
+        precio=precio,
+        fecha=payload.fecha,
+        condiciones=payload.condiciones,
+        vigencia=payload.vigencia or "15 días",
+    )
+
+    # 3. Crear PDF y Excel
+    pdf_path = _generar_pdf_proforma(contenido, payload.nombre)
+    excel_path = _generar_excel_proforma(contenido)
+
+    # 4. Registrar archivos para descarga
+    pdf_id = str(uuid.uuid4())
+    excel_id = str(uuid.uuid4())
+    _download_store[pdf_id] = (pdf_path, "application/pdf", "proforma.pdf")
+    _download_store[excel_id] = (excel_path, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "proforma.xlsx")
+
+    # 5. Enviar por correo (si está configurado)
+    await _enviar_correo(
+        destinatario=payload.correo,
+        asunto="Proforma de Servicios - Kairos Digital Lab",
+        cuerpo=contenido,
+        adjuntos=[pdf_path, excel_path],
+    )
+
+    # 6. Responder al frontend
+    return JSONResponse({
+        "status": "success",
+        "precio": precio,
+        "proforma": contenido,
+        "email_enviado": USE_EMAIL,
+        "message": "La proforma fue enviada al correo proporcionado." if USE_EMAIL else "Proforma generada. Configura MAIL_USERNAME/MAIL_PASSWORD para envío por correo.",
+        "download_links": {
+            "pdf": f"/api/download/{pdf_id}",
+            "excel": f"/api/download/{excel_id}",
+        },
+    })
 
 
 if __name__ == "__main__":
