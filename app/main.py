@@ -505,3 +505,41 @@ async def crear_proforma(payload: ProformaRequest):
 
 if __name__ == "__main__":
     uvicorn.run("app.main:app", host=os.getenv("HOST", "0.0.0.0"), port=int(os.getenv("PORT", 8000)), reload=True)
+
+
+# ── GET /test-email ───────────────────────────────────────────────────────────
+@app.get("/test-email")
+async def test_email():
+    """Debug endpoint: tries to send a real test email and returns detailed result."""
+    password = MAIL_PASSWORD.replace(" ", "")
+    config_info = {
+        "MAIL_USERNAME": MAIL_USERNAME or "(vacío)",
+        "MAIL_FROM": MAIL_FROM or "(vacío)",
+        "MAIL_SERVER": MAIL_SERVER,
+        "MAIL_PORT": MAIL_PORT,
+        "MAIL_PASSWORD_length": len(password),
+        "USE_EMAIL": USE_EMAIL,
+    }
+
+    if not USE_EMAIL:
+        return JSONResponse({"ok": False, "error": "USE_EMAIL=False — credenciales no configuradas", "config": config_info})
+
+    try:
+        def _test_send():
+            msg = MIMEMultipart()
+            msg["From"] = MAIL_FROM
+            msg["To"] = MAIL_USERNAME
+            msg["Subject"] = "Test SMTP - Kairos Digital Lab"
+            msg.attach(MIMEText("Este es un correo de prueba desde el backend de Kairos.", "plain", "utf-8"))
+            with smtplib.SMTP(MAIL_SERVER, MAIL_PORT, timeout=20) as server:
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+                server.login(MAIL_USERNAME, password)
+                server.sendmail(MAIL_FROM, MAIL_USERNAME, msg.as_string())
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _test_send)
+        return JSONResponse({"ok": True, "message": f"Correo de prueba enviado a {MAIL_USERNAME}", "config": config_info})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e), "config": config_info})
