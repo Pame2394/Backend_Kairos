@@ -15,12 +15,9 @@ from typing import Literal, Optional, Any, Dict
 import time
 import concurrent.futures
 
-# Optional fastapi-mail import
-try:
-    from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
-    _MAIL_AVAILABLE = True
-except ImportError:
-    _MAIL_AVAILABLE = False
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # Try modern GenAI SDK first, fall back to legacy
 GENAI_SDK = None
@@ -49,26 +46,12 @@ MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
 MAIL_FROM = os.getenv("MAIL_FROM", MAIL_USERNAME)
 MAIL_SERVER = os.getenv("MAIL_SERVER", "smtp.gmail.com")
 MAIL_PORT = int(os.getenv("MAIL_PORT", "587"))
-USE_EMAIL = bool(MAIL_USERNAME and MAIL_PASSWORD and _MAIL_AVAILABLE)
+USE_EMAIL = bool(MAIL_USERNAME and MAIL_PASSWORD)
 
-_fastmail: Optional[Any] = None
 if USE_EMAIL:
-    try:
-        _mail_conf = ConnectionConfig(
-            MAIL_USERNAME=MAIL_USERNAME,
-            MAIL_PASSWORD=MAIL_PASSWORD,
-            MAIL_FROM=MAIL_FROM,
-            MAIL_PORT=MAIL_PORT,
-            MAIL_SERVER=MAIL_SERVER,
-            MAIL_STARTTLS=True,
-            MAIL_SSL_TLS=False,
-            USE_CREDENTIALS=True,
-        )
-        _fastmail = FastMail(_mail_conf)
-        logger.info("Correo configurado: %s via %s:%s", MAIL_FROM, MAIL_SERVER, MAIL_PORT)
-    except Exception:
-        logger.exception("No se pudo configurar fastapi-mail")
-        USE_EMAIL = False
+    logger.info("Correo configurado: %s via %s:%s", MAIL_FROM, MAIL_SERVER, MAIL_PORT)
+else:
+    logger.warning("Correo NO configurado: MAIL_USERNAME o MAIL_PASSWORD vacíos")
 
 # Google Gemini configuration
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -412,20 +395,26 @@ def _generar_excel_proforma(contenido: str) -> str:
     return filename
 
 
-# ── Helper: send email ────────────────────────────────────────────────────────
+# ── Helper: send email via smtplib (built-in) ────────────────────────────────
 async def _enviar_correo(destinatario: str, asunto: str, cuerpo: str, adjuntos: list) -> None:
-    if not USE_EMAIL or _fastmail is None:
-        logger.warning("Envío de correo omitido: credenciales no configuradas")
+    if not USE_EMAIL:
+        logger.warning("Envío de correo omitido: MAIL_USERNAME=%r MAIL_PASSWORD=%s",
+                       MAIL_USERNAME, "***" if MAIL_PASSWORD else "(vacío)")
         return
     try:
-        mensaje = MessageSchema(
-            subject=asunto,
-            recipients=[destinatario],
-            body=cuerpo,
-            attachments=adjuntos,
-            subtype=MessageType.plain,
-        )
-        await _fastmail.send_message(mensaje)
+        msg = MIMEMultipart()
+        msg["From"] = MAIL_FROM
+        msg["To"] = destinatario
+        msg["Subject"] = asunto
+        msg.attach(MIMEText(cuerpo, "plain", "utf-8"))
+
+        with smtplib.SMTP(MAIL_SERVER, MAIL_PORT, timeout=15) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(MAIL_USERNAME, MAIL_PASSWORD)
+            server.sendmail(MAIL_FROM, destinatario, msg.as_string())
+
         logger.info("Correo enviado a %s", destinatario)
     except Exception:
         logger.exception("Error al enviar correo a %s", destinatario)
