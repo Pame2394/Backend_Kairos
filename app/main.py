@@ -412,8 +412,12 @@ def _resend_send(destinatario: str, asunto: str, cuerpo: str) -> dict:
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return _json.loads(resp.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return _json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Resend HTTP {e.code}: {body}") from e
 
 
 async def _enviar_correo(destinatario: str, asunto: str, cuerpo: str, adjuntos: list) -> None:
