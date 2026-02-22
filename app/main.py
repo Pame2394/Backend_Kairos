@@ -409,6 +409,7 @@ def _resend_send(destinatario: str, asunto: str, cuerpo: str) -> dict:
         headers={
             "Authorization": f"Bearer {RESEND_API_KEY}",
             "Content-Type": "application/json",
+            "User-Agent": "kairos-backend/1.0",
         },
         method="POST",
     )
@@ -538,7 +539,11 @@ async def test_email():
         req = urllib.request.Request(
             "https://api.resend.com/emails",
             data=payload,
-            headers={"Authorization": f"Bearer {resend_key}", "Content-Type": "application/json"},
+            headers={
+                "Authorization": f"Bearer {resend_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "kairos-backend/1.0",
+            },
             method="POST",
         )
         try:
