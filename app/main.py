@@ -515,23 +515,38 @@ if __name__ == "__main__":
 # ── GET /test-email ───────────────────────────────────────────────────────────
 @app.get("/test-email")
 async def test_email():
-    """Debug: sends a test email via Resend to MAIL_USERNAME and returns result."""
+    """Debug v3: sends test via Resend HTTP API."""
+    resend_key = os.getenv("RESEND_API_KEY", "")
+    mail_from = os.getenv("MAIL_FROM", "onboarding@resend.dev")
+    mail_to = os.getenv("MAIL_USERNAME", "pame2394@gmail.com")
     config_info = {
-        "RESEND_API_KEY_length": len(RESEND_API_KEY),
-        "MAIL_FROM": MAIL_FROM,
-        "MAIL_USERNAME": MAIL_USERNAME or "(vacío)",
-        "USE_EMAIL": USE_EMAIL,
+        "RESEND_API_KEY_length": len(resend_key),
+        "MAIL_FROM": mail_from,
+        "MAIL_TO": mail_to,
+        "USE_EMAIL": bool(resend_key),
     }
-    if not USE_EMAIL:
-        return JSONResponse({"ok": False, "error": "RESEND_API_KEY no configurado", "config": config_info})
+    if not resend_key:
+        return JSONResponse({"ok": False, "error": "RESEND_API_KEY vacio", "config": config_info})
     try:
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None, _resend_send,
-            MAIL_USERNAME or "pame2394@gmail.com",
-            "Test Resend - Kairos Digital Lab",
-            "Este es un correo de prueba desde el backend de Kairos."
+        import urllib.request, json as _json2
+        payload = _json2.dumps({
+            "from": mail_from,
+            "to": [mail_to],
+            "subject": "Test Resend v3 - Kairos",
+            "text": "Correo de prueba desde Kairos backend usando Resend.",
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.resend.com/emails",
+            data=payload,
+            headers={"Authorization": f"Bearer {resend_key}", "Content-Type": "application/json"},
+            method="POST",
         )
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                result = _json2.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            return JSONResponse({"ok": False, "error": f"HTTP {e.code}: {body}", "config": config_info})
         return JSONResponse({"ok": True, "resend_response": result, "config": config_info})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e), "config": config_info})
