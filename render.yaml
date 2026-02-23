@@ -18,16 +18,10 @@ services:
       - key: GENAI_BACKOFF_BASE
         value: "1.0"
       - key: MAIL_USERNAME
-        value: "Pame2394@gmail.com"
+        value: "pame2394@gmail.com"
       - key: MAIL_FROM
-        value: "Pame2394@gmail.com"
-      - key: MAIL_SERVER
-        value: "smtp.gmail.com"
-      - key: MAIL_PORT
-        value: "587"
-      - key: MAIL_PASSWORD
+        value: "pame2394@gmail.com"
+      - key: MAIL_FROM_NAME
+        value: "Kairos Digital Lab"
+      - key: BREVO_API_KEY
         sync: false   # set manually in Render dashboard
-      - key: RESEND_API_KEY
-        value: "re_Z6wqsFsu_H6tYM4o5xgGLQWGfuvKowQXG"
-      - key: MAIL_FROM
-        value: "onboarding@resend.dev"

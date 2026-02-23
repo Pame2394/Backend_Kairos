@@ -40,17 +40,17 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Email configuration — uses Resend HTTP API (works on Render free tier)
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-# Free Resend plan must use onboarding@resend.dev unless domain is verified
-MAIL_FROM = os.getenv("MAIL_FROM", "onboarding@resend.dev")
-MAIL_USERNAME = os.getenv("MAIL_USERNAME", "")   # destination / owner email
-USE_EMAIL = bool(RESEND_API_KEY)
+# Email configuration — uses Brevo (Sendinblue) HTTP API (works on Render free tier)
+BREVO_API_KEY = os.getenv("BREVO_API_KEY", "")
+MAIL_FROM = os.getenv("MAIL_FROM", "pame2394@gmail.com")
+MAIL_FROM_NAME = os.getenv("MAIL_FROM_NAME", "Kairos Digital Lab")
+MAIL_USERNAME = os.getenv("MAIL_USERNAME", "")   # owner email (for test-email)
+USE_EMAIL = bool(BREVO_API_KEY)
 
 if USE_EMAIL:
-    logger.info("Resend configurado — from: %s", MAIL_FROM)
+    logger.info("Brevo configurado — from: %s", MAIL_FROM)
 else:
-    logger.warning("Email NO configurado: falta RESEND_API_KEY")
+    logger.warning("Email NO configurado: falta BREVO_API_KEY")
 
 # Google Gemini configuration
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -394,20 +394,20 @@ def _generar_excel_proforma(contenido: str) -> str:
     return filename
 
 
-# ── Helper: send email via Resend HTTP API (works on Render free tier) ────────
-def _resend_send(destinatario: str, asunto: str, cuerpo: str) -> dict:
-    """Calls Resend API over HTTPS — not blocked by Render."""
+# ── Helper: send email via Brevo HTTP API (works on Render free tier) ────────
+def _brevo_send(destinatario: str, asunto: str, cuerpo: str) -> dict:
+    """Calls Brevo transactional email API over HTTPS."""
     payload = _json.dumps({
-        "from": MAIL_FROM,
-        "to": [destinatario],
+        "sender": {"name": MAIL_FROM_NAME, "email": MAIL_FROM},
+        "to": [{"email": destinatario}],
         "subject": asunto,
-        "text": cuerpo,
+        "textContent": cuerpo,
     }).encode("utf-8")
     req = urllib.request.Request(
-        "https://api.resend.com/emails",
+        "https://api.brevo.com/v3/smtp/email",
         data=payload,
         headers={
-            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "api-key": BREVO_API_KEY,
             "Content-Type": "application/json",
             "User-Agent": "kairos-backend/1.0",
         },
@@ -418,17 +418,17 @@ def _resend_send(destinatario: str, asunto: str, cuerpo: str) -> dict:
             return _json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Resend HTTP {e.code}: {body}") from e
+        raise RuntimeError(f"Brevo HTTP {e.code}: {body}") from e
 
 
 async def _enviar_correo(destinatario: str, asunto: str, cuerpo: str, adjuntos: list) -> None:
     if not USE_EMAIL:
-        logger.warning("Email omitido: RESEND_API_KEY no configurado")
+        logger.warning("Email omitido: BREVO_API_KEY no configurado")
         return
     try:
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, _resend_send, destinatario, asunto, cuerpo)
-        logger.info("Correo enviado via Resend a %s — id=%s", destinatario, result.get("id"))
+        result = await loop.run_in_executor(None, _brevo_send, destinatario, asunto, cuerpo)
+        logger.info("Correo enviado via Brevo a %s — messageId=%s", destinatario, result.get("messageId"))
     except Exception:
         logger.exception("Error al enviar correo a %s", destinatario)
 
@@ -516,31 +516,32 @@ if __name__ == "__main__":
 # ── GET /test-email ───────────────────────────────────────────────────────────
 @app.get("/test-email")
 async def test_email():
-    """Debug v3: sends test via Resend HTTP API."""
-    resend_key = os.getenv("RESEND_API_KEY", "")
-    mail_from = os.getenv("MAIL_FROM", "onboarding@resend.dev")
+    """Debug: sends test via Brevo HTTP API."""
+    brevo_key = os.getenv("BREVO_API_KEY", "")
+    mail_from = os.getenv("MAIL_FROM", "pame2394@gmail.com")
+    mail_from_name = os.getenv("MAIL_FROM_NAME", "Kairos Digital Lab")
     mail_to = os.getenv("MAIL_USERNAME", "pame2394@gmail.com")
     config_info = {
-        "RESEND_API_KEY_length": len(resend_key),
+        "BREVO_API_KEY_length": len(brevo_key),
         "MAIL_FROM": mail_from,
         "MAIL_TO": mail_to,
-        "USE_EMAIL": bool(resend_key),
+        "USE_EMAIL": bool(brevo_key),
     }
-    if not resend_key:
-        return JSONResponse({"ok": False, "error": "RESEND_API_KEY vacio", "config": config_info})
+    if not brevo_key:
+        return JSONResponse({"ok": False, "error": "BREVO_API_KEY vacio", "config": config_info})
     try:
         import urllib.request, json as _json2
         payload = _json2.dumps({
-            "from": mail_from,
-            "to": [mail_to],
-            "subject": "Test Resend v3 - Kairos",
-            "text": "Correo de prueba desde Kairos backend usando Resend.",
+            "sender": {"name": mail_from_name, "email": mail_from},
+            "to": [{"email": mail_to}],
+            "subject": "Test Brevo - Kairos",
+            "textContent": "Correo de prueba desde Kairos backend usando Brevo.",
         }).encode("utf-8")
         req = urllib.request.Request(
-            "https://api.resend.com/emails",
+            "https://api.brevo.com/v3/smtp/email",
             data=payload,
             headers={
-                "Authorization": f"Bearer {resend_key}",
+                "api-key": brevo_key,
                 "Content-Type": "application/json",
                 "User-Agent": "kairos-backend/1.0",
             },
@@ -552,6 +553,6 @@ async def test_email():
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
             return JSONResponse({"ok": False, "error": f"HTTP {e.code}: {body}", "config": config_info})
-        return JSONResponse({"ok": True, "resend_response": result, "config": config_info})
+        return JSONResponse({"ok": True, "brevo_response": result, "config": config_info})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e), "config": config_info})
